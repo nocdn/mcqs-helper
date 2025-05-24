@@ -3,7 +3,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 import requests
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -15,7 +15,7 @@ RESEND_API_KEY: Optional[str] = os.getenv("RESEND_API_KEY")
 GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY")
 PERPLEXITY_API_KEY: Optional[str] = os.getenv("PERPLEXITY_API_KEY")
 
-GEMINI_MODEL_NAME: str = os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash")
+GEMINI_MODEL_NAME: str = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash-preview-05-20")
 DEFAULT_FROM_EMAIL: str = os.getenv("DEFAULT_FROM_EMAIL", "MCQS Feedback <code@voting.bartoszbak.org>")
 DEFAULT_SUBJECT_LINE: str = os.getenv("DEFAULT_SUBJECT_LINE", "MCQS Feedback")
 
@@ -68,7 +68,7 @@ def generate_subject_with_gemini(feedback_html: str, api_key: Optional[str]) -> 
 
     payload: Dict[str, Any] = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 20, "temperature": 0.7},
+        "generationConfig": {"maxOutputTokens": 20, "temperature": 0.5},
     }
 
     try:
@@ -179,8 +179,45 @@ def send_feedback():
 @limiter.limit(EXPLAIN_RATE_LIMIT)
 @app.route("/explain", methods=["POST"])
 def explain():
-    """Explain why the answer is so, using Perplexity API."""
-    return jsonify(status="ok"), 200
+    """Explain why the answer is so, using Perplexity API and proxy the response."""
+    if not request.is_json:
+        return jsonify(error="Request body must be JSON"), 400
+    req_body = request.get_json(silent=True) or {}
+    question_text = req_body.get("question")
+    answer_text = req_body.get("correct_answer")
+    missing = [name for name, val in (("question", question_text), ("correct_answer", answer_text)) if not val]
+    if missing:
+        return jsonify(error=f"Missing required parameters: {', '.join(missing)}"), 400
+    if not PERPLEXITY_API_KEY:
+        return jsonify(error="Server misconfiguration – PERPLEXITY_API_KEY is missing"), 500
+    prompt = (
+        f"Please explain clearly and in simple terms but without being too verbose, "
+        f"why the answer to the question {question_text} is {answer_text}. "
+        "Do not use markdown. Just plain text"
+    )
+    payload = {
+        "model": "sonar-pro",
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+    }
+    try:
+        resp = requests.post(
+            "https://api.perplexity.ai/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        app.logger.error("Network error contacting Perplexity: %s", exc)
+        return jsonify(error="Network error contacting Perplexity"), 502
+    if not (200 <= resp.status_code < 300):
+        app.logger.warning("Perplexity API returned non-2xx (status %s): %s", resp.status_code, resp.text)
+        return Response(resp.text, status=resp.status_code, mimetype="application/json")
+    return Response(resp.text, status=resp.status_code, mimetype="application/json")
 
 
 if __name__ == "__main__":

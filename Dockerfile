@@ -1,4 +1,4 @@
-FROM ghcr.io/astral-sh/uv:alpine
+FROM ghcr.io/astral-sh/uv:python3.12-alpine
 
 WORKDIR /app
 
@@ -10,4 +10,4 @@ COPY . .
 
 EXPOSE 7480
 
-CMD ["uv", "run", "app.py"]
+CMD ["uv", "run", "gunicorn", "--bind", "0.0.0.0:7480", "app:app"]

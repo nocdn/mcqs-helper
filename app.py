@@ -11,6 +11,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# validate required env vars at startup
+def validate_required_env_vars():
+    """validates that all required environment variables are present. raises error if any are missing."""
+    required_vars = ["RESEND_API_KEY", "GEMINI_API_KEY", "PERPLEXITY_API_KEY"]
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    
+    if missing_vars:
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing_vars)}")
+
+validate_required_env_vars()
+
 RESEND_API_KEY: Optional[str] = os.getenv("RESEND_API_KEY")
 GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY")
 PERPLEXITY_API_KEY: Optional[str] = os.getenv("PERPLEXITY_API_KEY")
@@ -29,8 +40,7 @@ CORS(app)
 limiter = Limiter(key_func=get_remote_address, app=app, default_limits=[])
 
 def _extract_first_text_from_gemini(resp: Dict[str, Any]) -> Optional[str]:
-    """Return first non-empty text chunk from Gemini response or None."""
-
+    """extracts first text content from gemini api response json. returns none if no text found."""
     for cand in resp.get("candidates", []):
         content = cand.get("content") or cand.get("message") or {}
         for part in content.get("parts", []):
@@ -38,17 +48,12 @@ def _extract_first_text_from_gemini(resp: Dict[str, Any]) -> Optional[str]:
             if txt:
                 return txt
 
-    # Some experimental endpoints put text at top level
     top_txt = str(resp.get("text", "")).strip()
     return top_txt or None
 
 
 def generate_subject_with_gemini(feedback_html: str, api_key: Optional[str]) -> str:
-    """Generate a concise subject line using Gemini.
-
-    Falls back to DEFAULT_SUBJECT_LINE if the key isn't configured or on errors.
-    """
-
+    """generates email subject line using gemini api based on feedback content. falls back to default if api fails or key missing."""
     if not api_key:
         app.logger.warning("Gemini API key not configured – using default subject line.")
         return DEFAULT_SUBJECT_LINE
@@ -98,21 +103,14 @@ def generate_subject_with_gemini(feedback_html: str, api_key: Optional[str]) -> 
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Basic health-check endpoint."""
+    """health check endpoint. returns json status ok with 200 code."""
     return jsonify(status="ok"), 200
 
 
 @limiter.limit(SEND_EMAIL_RATE_LIMIT)
 @app.route("/feedback", methods=["POST"])
 def send_feedback():
-    """Send email via Resend API with Gemini-generated subject line."""
-
-    if not RESEND_API_KEY:
-        return (
-            jsonify(error="Server misconfiguration – RESEND_API_KEY is missing"),
-            500,
-        )
-
+    """sends feedback email via resend api. expects json with html_body and to fields. generates subject with gemini."""
     if not request.is_json:
         return jsonify(error="Request body must be JSON"), 400
 
@@ -159,7 +157,6 @@ def send_feedback():
         app.logger.error("Network error contacting Resend: %s", exc)
         return jsonify(error="Network error contacting Resend"), 502
 
-    # On non-2xx, propagate error details if available
     if not (200 <= resp.status_code < 300):
         app.logger.warning(
             "Resend API returned non-2xx (status %s): %s", resp.status_code, resp.text
@@ -179,7 +176,7 @@ def send_feedback():
 @limiter.limit(EXPLAIN_RATE_LIMIT)
 @app.route("/explain", methods=["POST"])
 def explain():
-    """Explain why the answer is so, using Perplexity API and proxy the response."""
+    """explains why an answer is correct using perplexity api. expects json with question and correct_answer fields."""
     if not request.is_json:
         return jsonify(error="Request body must be JSON"), 400
     req_body = request.get_json(silent=True) or {}
@@ -188,8 +185,6 @@ def explain():
     missing = [name for name, val in (("question", question_text), ("correct_answer", answer_text)) if not val]
     if missing:
         return jsonify(error=f"Missing required parameters: {', '.join(missing)}"), 400
-    if not PERPLEXITY_API_KEY:
-        return jsonify(error="Server misconfiguration – PERPLEXITY_API_KEY is missing"), 500
     prompt = (
         f"Please explain clearly and in simple terms but without being too verbose, "
         f"why the answer to the question {question_text} is {answer_text}. "

@@ -2,14 +2,14 @@
 
 > a helper api for the MCQS project
 
-### Build
+### Build and run
 
 ```bash
 docker build -t mcqs-helper-img .
 ```
 
 ```bash
-docker run -p 7480:7480 --env-file .env mcqs-helper-img
+docker run -d -p 7480:7480 --env-file .env mcqs-helper-img
 ```
 
 ### Email Usage
